@@ -1,0 +1,75 @@
+INSERT INTO DP_EFS_METADATA.EFS_QUERYBAND_STATS_T
+SELECT
+	A.Group_Name
+	,A.Script_Name
+	,A.Batch_ID
+	,A.Process_ID
+	,A.query_start
+	,A.uname
+	,A.cpuused
+	,A.ImpactCPU
+	,A.CPUOverhead
+	,B.ElapsedTime
+	,A.Spool_GB
+	,A.IOSkw
+	,A.PJI
+FROM (
+select  
+b.sqltextinfo, 
+cast(a.Collecttimestamp as date)logdate,
+a.QueryBand,
+REGEXP_SUBSTR_GPL(a.QueryBand, 'GROUP_NAME=([^;]+)', 1, 1, 'i', 1) AS Group_Name,
+REGEXP_SUBSTR_GPL(a.QueryBand, 'SCRIPT_NAME=([^;]+)', 1, 1, 'i', 1) AS Script_Name,
+REGEXP_SUBSTR_GPL(a.QueryBand, 'BATCH_ID=([^;]+)', 1, 1, 'i', 1) AS Batch_ID,
+REGEXP_SUBSTR_GPL(a.QueryBand, 'PROCESS_ID=([^;]+)', 1, 1, 'i', 1) AS Process_ID,
+a.firststeptime as query_start, 
+a.username uname, a.ampcputime as cpuused,
+a.maxampcputime * (1 + hashamp()) ImpactCPU
+,ImpactCPU - cpuused CPUOverhead,
+( ( a.firstresptime - a.starttime  ) HOUR( 4 )  TO SECOND( 6 )  ) AS ElapsedTime ,
+a.SpoolUsage/1024/1024/1024 as Spool_GB,
+CASE    
+   WHEN a.MaxAmpIO = 0 THEN 0 
+   ELSE    ( ( 1 - ( a.TotalIOCount / ( HASHAMP ( ) + 1  )  ) / a.MaxAmpIO  ) * 100 ( DEC ( 10 ,
+       2 ) )  )
+END AS IOSkw ,
+CASE 
+   WHEN    a.ampcputime < 1 
+   OR  a.TotalIOCount = 0 THEN 0 
+   ELSE    ( a.AmpCPUTime * 1000  ) / a.TotalIOCount
+END AS PJI
+from DBC.dbqlogtbl a, DBC.dbqlsqltbl  b
+where cast(a.Collecttimestamp as date) = cast(b.Collecttimestamp as date)
+   and a.queryid = b.queryid
+   and a.procid = b.procid
+   and cast(a.Collecttimestamp as date) > date - 15
+   and cast(b.Collecttimestamp as date) > date- 15
+   and lower(a.username) like '%up_tenx_super%' 
+   and a.queryband is not null 
+   and UPPER(A.queryband) like '%EFS%'
+   )A  
+   INNER JOIN 
+   (SELECT BATCH_ID
+   	,PROCESS_ID
+   	,SCRIPT_NAME
+   	,JOB_NAME 
+   	,( ( LOAD_END_DTTM - LOAD_START_DTTM  ) HOUR( 4 )  TO SECOND( 6 )  ) AS ElapsedTime 
+   	
+   	FROM DP_EFS_METADATA.DAILY_BATCH_PROCESS  
+   	WHERE status_id =2  
+   	AND LOAD_END_DTTM IS NOT NULL
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY BATCH_ID, PROCESS_ID, SCRIPT_NAME, JOB_NAME  ORDER BY LOAD_START_DTTM DESC, LOAD_END_DTTM DESC) = 1
+    )B
+   ON A.PROCESS_ID = B.PROCESS_ID
+   AND A.BATCH_ID = B.BATCH_ID
+   AND A.SCRIPT_NAME = B.SCRIPT_NAME
+   AND A.GROUP_NAME = B.JOB_NAME
+   
+   WHERE NOT EXISTS (
+    SELECT 1 
+    FROM DP_EFS_METADATA.EFS_QUERYBAND_STATS_T T
+    WHERE T.Batch_ID = A.Batch_ID
+      AND T.Process_ID = A.Process_ID
+      AND T.Script_Name = A.Script_Name
+      AND T.Group_Name = A.Group_Name
+);
